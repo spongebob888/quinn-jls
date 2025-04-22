@@ -513,7 +513,7 @@ struct CurrentLossBurst {
 // https://www.rfc-editor.org/rfc/rfc8899#section-5.1.2)
 const MAX_PROBE_RETRANSMITS: usize = 3;
 /// Maximum number of suspicious loss bursts that will not trigger black hole detection
-const BLACK_HOLE_THRESHOLD: usize = 6;  // 3 is too small for high packet loss network(10%) which is triggered repeatedly
+const BLACK_HOLE_THRESHOLD: usize = 8;  // 3 is too small for high packet loss network(10%) which is triggered repeatedly
 
 #[cfg(test)]
 mod tests {
