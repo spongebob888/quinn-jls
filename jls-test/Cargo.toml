@@ -11,7 +11,7 @@ bytes = { workspace = true }
 clap = { workspace = true }
 env_logger = "0.11.8"
 hdrhistogram = { workspace = true }
-quinn = { path = "../quinn" }
+quinn = { package = "quinn-jls", path = "../quinn-jls" }
 quinn-proto = { path = "../quinn-proto" }
 rcgen = { workspace = true }
 rustls = { workspace = true, features = ["logging"]}

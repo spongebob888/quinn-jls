@@ -1,5 +1,5 @@
 [package]
-name = "quinn"
+name = "quinn-jls"
 version = "0.11.7"
 license.workspace = true
 repository.workspace = true
