@@ -1,6 +1,6 @@
 [workspace]
-members = ["quinn-jls", "quinn-proto", "quinn-udp", "bench", "perf", "fuzz", "jls-test"]
-default-members = ["quinn-jls", "quinn-proto", "quinn-udp", "bench", "perf"]
+members = ["quinn-jls", "quinn-proto-jls", "quinn-udp-jls", "bench", "perf", "fuzz", "jls-test"]
+default-members = ["quinn-jls", "quinn-proto-jls", "quinn-udp-jls", "bench", "perf"]
 resolver = "2"
 
 [workspace.package]
@@ -35,7 +35,7 @@ rand = "0.9"
 rcgen = "0.13"
 ring = "0.17"
 rustc-hash = "2"
-rustls = { git="https://github.com/spongebob888/rustls-jls", version="0.23.25-1.0.2", default-features = false, features = ["std"] }
+rustls = { package = "rustls-jls", version="0.23.25-1.0.2", default-features = false, features = ["std"] }
 rustls-pemfile = "2"
 rustls-platform-verifier = "0.5"
 rustls-pki-types = "1.7"
@@ -66,8 +66,6 @@ debug = true
 [profile.release]
 debug = true
 
-[patch.crates-io]
-rustls = { git="https://github.com/spongebob888/rustls-jls", version="0.23.25-1.0.2"}
 # Only for testing
 [patch."https://github.com/quinn-rs/quinn"]
 rustls = { package = "rustls",git = "https://github.com/rustls/rustls",tag="v/0.23.25"}
