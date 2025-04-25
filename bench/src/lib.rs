@@ -3,13 +3,14 @@ use std::{
     net::{IpAddr, Ipv6Addr, SocketAddr},
     num::ParseIntError,
     str::FromStr,
-    sync::Arc,
+    sync::Arc, time::Duration,
 };
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use clap::Parser;
-use quinn::crypto::rustls::QuicClientConfig;
+use impaired_socket::ImpairedSocket;
+use quinn::{crypto::rustls::QuicClientConfig, ClientConfig, EndpointConfig};
 use rustls::{
     RootCertStore,
     pki_types::{CertificateDer, PrivateKeyDer},
@@ -18,6 +19,7 @@ use tokio::runtime::{Builder, Runtime};
 use tracing::trace;
 
 pub mod stats;
+pub mod impaired_socket;
 
 pub fn configure_tracing_subscriber() {
     tracing::subscriber::set_global_default(
@@ -57,8 +59,13 @@ pub async fn connect_client(
     server_cert: CertificateDer<'_>,
     opt: Opt,
 ) -> Result<(quinn::Endpoint, quinn::Connection)> {
-    let endpoint =
-        quinn::Endpoint::client(SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 0)).unwrap();
+    let rt = quinn::default_runtime().unwrap();
+
+    let socket = std::net::UdpSocket::bind(SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 0))?;
+    let socket = Arc::new(ImpairedSocket::new(socket, 150)?);
+    let endpoint = quinn::Endpoint::new_with_abstract_socket(
+        EndpointConfig::default(), None, socket, rt)?;
+
 
     let mut roots = RootCertStore::empty();
     roots.add(server_cert)?;
@@ -84,7 +91,15 @@ pub async fn connect_client(
         .await
         .context("unable to connect")?;
     trace!("connected");
-
+    let conn = connection.clone();
+    tokio::spawn(async move {
+        loop {
+            let rate = conn.stats().path.lost_packets as f64 / conn.stats().path.sent_packets as f64; 
+            println!("rtt:{:?}, mtu:{},packet_loss_rate:{}", conn.stats().path.rtt, conn.stats().path.current_mtu,
+        rate);
+            tokio::time::sleep(Duration::from_millis(1000)).await;
+        }
+    });
     Ok((endpoint, connection))
 }
 
@@ -118,7 +133,7 @@ pub async fn drain_stream(stream: &mut quinn::RecvStream, read_unordered: bool) 
 }
 
 pub async fn send_data_on_stream(stream: &mut quinn::SendStream, stream_size: u64) -> Result<()> {
-    const DATA: &[u8] = &[0xAB; 1024 * 1024];
+    const DATA: &[u8] = &[0xAB; 10 * 1024];
     let bytes_data = Bytes::from_static(DATA);
 
     let full_chunks = stream_size / (DATA.len() as u64);
@@ -129,6 +144,7 @@ pub async fn send_data_on_stream(stream: &mut quinn::SendStream, stream_size: u6
             .write_chunk(bytes_data.clone())
             .await
             .context("failed sending data")?;
+        tokio::time::sleep(Duration::from_millis(1)).await;
     }
 
     if remaining != 0 {
