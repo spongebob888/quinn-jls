@@ -10,7 +10,9 @@ anyhow = { workspace = true }
 bytes = { workspace = true }
 clap = { workspace = true }
 hdrhistogram = { workspace = true }
+pin-project-lite.workspace = true
 quinn = { path = "../quinn", features = ["ring"] }
+rand.workspace = true
 rcgen = { workspace = true }
 rustls = { workspace = true }
 tokio = { workspace = true, features = ["rt"] }
