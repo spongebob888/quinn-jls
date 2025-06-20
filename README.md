@@ -12,6 +12,9 @@ Quinn-jls 是 [quinn](https://github.com/quinn-rs/quinn) 的fork 分支，该库
 * 无需域名和证书（自签或自动生成）
 * 非JLS客户端自动进行UDP转发
 
+## 使用示例
+- [jls_client](./quinn/examples/jls_client.rs)
+- [jls_server](./quinn/examples/jls_server.rs)
 ## 关于 0 RTT
 即便0rtt被使能了，也不一定能实现0rtt握手，0rtt握手有
 严格的要求，不符合这些要求的握手将退化为1rtt握手：
