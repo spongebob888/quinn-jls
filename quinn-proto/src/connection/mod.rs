@@ -2718,7 +2718,7 @@ impl Connection {
         }
 
         // Stop sending serverhello if jls authentication failed
-        match (self.crypto.is_jls(),self.crypto.is_jls_enabled()) {
+        match (self.crypto.is_jls(), self.crypto.is_jls_enabled()) {
             (Some(true), true) => {
                 debug!("JLS authenticated");
             }
@@ -2729,7 +2729,7 @@ impl Connection {
                 }
             }
             (None, true) => {
-                warn!("JLS not authenticated");
+                debug!("JLS not authenticated");
             }
             (_, false) => {
                 debug!("JLS disabled");
