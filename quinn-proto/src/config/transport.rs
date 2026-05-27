@@ -689,6 +689,7 @@ pub struct MtuDiscoveryConfig {
     pub(crate) upper_bound: u16,
     pub(crate) minimum_change: u16,
     pub(crate) black_hole_cooldown: Duration,
+    pub(crate) black_hole_detection: bool,
 }
 
 impl MtuDiscoveryConfig {
@@ -730,6 +731,14 @@ impl MtuDiscoveryConfig {
         self.minimum_change = value;
         self
     }
+
+    /// Specifies whether black hole detection is enabled during MTU discovery.
+    ///
+    /// Defaults to `true`.
+    pub fn black_hole_detection(&mut self, value: bool) -> &mut Self {
+        self.black_hole_detection = value;
+        self
+    }
 }
 
 impl Default for MtuDiscoveryConfig {
@@ -739,6 +748,7 @@ impl Default for MtuDiscoveryConfig {
             upper_bound: 1452,
             black_hole_cooldown: Duration::from_secs(60),
             minimum_change: 20,
+            black_hole_detection: true,
         }
     }
 }

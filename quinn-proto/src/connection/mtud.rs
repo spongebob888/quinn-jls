@@ -13,6 +13,8 @@ pub(crate) struct MtuDiscovery {
     state: Option<EnabledMtuDiscovery>,
     /// The state of the black hole detector
     black_hole_detector: BlackHoleDetector,
+    /// Whether black hole detection is enabled
+    black_hole_detection: bool,
 }
 
 impl MtuDiscovery {
@@ -27,10 +29,12 @@ impl MtuDiscovery {
             "initial_max_udp_payload_size must be at least {min_mtu}"
         );
 
+        let black_hole_detection = config.black_hole_detection;
         let mut mtud = Self::with_state(
             initial_plpmtu,
             min_mtu,
             Some(EnabledMtuDiscovery::new(config)),
+            black_hole_detection,
         );
 
         // We might be migrating an existing connection to a new path, in which case the transport
@@ -45,14 +49,20 @@ impl MtuDiscovery {
 
     /// MTU discovery will be disabled and the current MTU will be fixed to the provided value
     pub(crate) fn disabled(plpmtu: u16, min_mtu: u16) -> Self {
-        Self::with_state(plpmtu, min_mtu, None)
+        Self::with_state(plpmtu, min_mtu, None, true)
     }
 
-    fn with_state(current_mtu: u16, min_mtu: u16, state: Option<EnabledMtuDiscovery>) -> Self {
+    fn with_state(
+        current_mtu: u16,
+        min_mtu: u16,
+        state: Option<EnabledMtuDiscovery>,
+        black_hole_detection: bool,
+    ) -> Self {
         Self {
             current_mtu,
             state,
             black_hole_detector: BlackHoleDetector::new(min_mtu),
+            black_hole_detection,
         }
     }
 
@@ -148,6 +158,10 @@ impl MtuDiscovery {
     /// Calling this function will close the previous loss burst. If a black hole is detected, the
     /// current MTU will be reset to `min_mtu`.
     pub(crate) fn black_hole_detected(&mut self, now: Instant) -> bool {
+        if !self.black_hole_detection {
+            return false;
+        }
+
         if !self.black_hole_detector.black_hole_detected() {
             return false;
         }
@@ -602,13 +616,13 @@ mod tests {
     }
 
     #[test]
-    fn mtu_discovery_disabled_lost_four_packet_bursts_triggers_black_hole_detection() {
+    fn mtu_discovery_disabled_lost_packet_bursts_triggers_black_hole_detection() {
         let mut mtud = MtuDiscovery::disabled(1_400, 1_250);
         let now = Instant::now();
 
-        for i in 0..4 {
+        for i in 0..(BLACK_HOLE_THRESHOLD + 1) {
             // The packets are never contiguous, so each one has its own burst
-            mtud.on_non_probe_lost(i * 2, 1300);
+            mtud.on_non_probe_lost(i as u64 * 2, 1300);
         }
 
         assert!(mtud.black_hole_detected(now));
@@ -628,13 +642,13 @@ mod tests {
     }
 
     #[test]
-    fn mtu_discovery_lost_four_packet_bursts_triggers_black_hole_detection_and_resets_timer() {
+    fn mtu_discovery_lost_packet_bursts_triggers_black_hole_detection_and_resets_timer() {
         let mut mtud = default_mtud();
         let now = Instant::now();
 
-        for i in 0..4 {
+        for i in 0..(BLACK_HOLE_THRESHOLD + 1) {
             // The packets are never contiguous, so each one has its own burst
-            mtud.on_non_probe_lost(i * 2, 1300);
+            mtud.on_non_probe_lost(i as u64 * 2, 1300);
         }
 
         assert!(mtud.black_hole_detected(now));
@@ -644,6 +658,20 @@ mod tests {
         } else {
             panic!("Unexpected MTUD phase!");
         }
+    }
+
+    #[test]
+    fn mtu_discovery_black_hole_detection_disabled_does_not_trigger() {
+        let mut config = MtuDiscoveryConfig::default();
+        config.black_hole_detection(false);
+        let mut mtud = MtuDiscovery::new(1_200, 1_200, None, config);
+        let now = Instant::now();
+
+        for i in 0..(BLACK_HOLE_THRESHOLD + 1) {
+            mtud.on_non_probe_lost(i as u64 * 2, 1300);
+        }
+
+        assert!(!mtud.black_hole_detected(now));
     }
 
     #[test]
