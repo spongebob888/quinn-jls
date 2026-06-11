@@ -1,6 +1,6 @@
 [package]
-name = "quinn"
-version = "0.12.0"
+name = "quinn-jls"
+version = "0.3.6"
 license.workspace = true
 repository.workspace = true
 description = "Versatile QUIC transport protocol implementation"
@@ -57,13 +57,13 @@ bytes = { workspace = true }
 futures-io = { workspace = true, optional = true }
 rustc-hash = { workspace = true }
 pin-project-lite = { workspace = true }
-proto = { package = "quinn-proto", path = "../quinn-proto", version = "0.12.0", default-features = false }
+proto = { package = "quinn-proto-jls", path = "../quinn-proto", version = "0.3.6", default-features = false }
 rustls = { workspace = true, optional = true }
 smol = { workspace = true, optional = true }
 thiserror = { workspace = true }
 tracing =  { workspace = true }
 tokio = { workspace = true }
-udp = { package = "quinn-udp", path = "../quinn-udp", version = "0.6", default-features = false, features = ["tracing"] }
+udp = { package = "quinn-udp-jls", path = "../quinn-udp", version = "0.3.6", default-features = false, features = ["tracing"] }
 
 [target.'cfg(not(all(target_family = "wasm", target_os = "unknown")))'.dependencies]
 socket2 = { workspace = true }
