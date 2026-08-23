@@ -10,7 +10,7 @@ use proto::{ConnectionError, EcnCodepoint, Transmit};
 use tracing::debug;
 use udp::RecvMeta;
 
-use crate::{AsyncUdpSocket, Runtime, UdpSender, endpoint::respond};
+use crate::{udp_transmit, AsyncUdpSocket, Runtime, UdpSender, endpoint::respond};
 
 const RATE_LIMIT_CYCLE: Duration = Duration::from_millis(10); // 10ms
 
@@ -43,7 +43,7 @@ pub(crate) fn insert_forward_conn(
     now: Instant,
 ) -> Result<(), ConnectionError> {
     let (socket, upstream_addr) = bind_upstream_socket(upstream_addr)?;
-    debug!("new forward connection");
+    debug!("new forward connection:transmit:{}", trans.len());
 
     let udp_socket = runtime.wrap_udp_socket(socket).unwrap();
     let mut udp_sender = udp_socket.create_sender();
@@ -63,12 +63,25 @@ pub(crate) fn insert_forward_conn(
         recv_limiter: JlsRateLimiter::new(RATE_LIMIT_CYCLE, byte_per_cycle as usize), // 128K per second
     };
 
-    let mut pos = 0;
-    for mut trans in trans {
-        let size = trans.size;
-        trans.destination = upstream_addr;
-        super::endpoint::respond(trans, &response_buffer[pos..], &mut udp_sender);
-        pos += size;
+    // The forward socket was created just above, so the async runtime has not
+    // registered it with the I/O driver yet: a fire-and-forget `poll_send` with a
+    // noop waker (as `endpoint::respond` uses for stateless responses on an
+    // already-registered socket) returns `Poll::Pending` on the very first poll
+    // and silently drops the datagram. Spawn the initial forwards as an async
+    // task that awaits writability with a real waker before sending.
+    let buf = response_buffer.to_vec();
+    if !trans.is_empty() {
+        let mut pos = 0;
+        runtime.spawn(Box::pin(async move {
+            for mut tr in trans {
+                tr.destination = upstream_addr;
+                let transmit = udp_transmit(&tr, &buf[pos..pos + tr.size]);
+                tracing::trace!("initial jls forward to upstream {} bytes", tr.size);
+                let _ =
+                    std::future::poll_fn(|cx| udp_sender.as_mut().poll_send(&transmit, cx)).await;
+                pos += tr.size;
+            }
+        }));
     }
 
     jls_state.upstream_connections.insert(remote_addr, jls_conn);

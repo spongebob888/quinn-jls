@@ -568,6 +568,12 @@ impl Endpoint {
             }));
         }
 
+        let packet_clone: Packet = InitialPacket {
+            header: incoming.packet.header.clone(),
+            header_data: incoming.packet.header_data.clone(),
+            payload: incoming.packet.payload.clone(),
+        }.into();
+
         if incoming
             .crypto
             .packet
@@ -634,18 +640,13 @@ impl Endpoint {
 
         // For JLS forward
         let (fwd_buf, trans_vec) = {
+            let mut trans_vec = std::vec![];
             let mut fwd_buf = std::vec![];
-            let packet_clone = InitialPacket {
-                header: incoming.packet.header.clone(),
-                header_data: incoming.packet.header_data.clone(),
-                payload: incoming.packet.payload.clone(),
-            };
             let packet_rest = incoming.rest.clone();
-            let packet_clone: Packet = packet_clone.into();
-            let _partial_encode = packet_clone.header.encode(&mut fwd_buf); // To be confirmed
+
+            fwd_buf.extend_from_slice(&packet_clone.header_data);
             fwd_buf.extend_from_slice(&packet_clone.payload);
             fwd_buf.extend_from_slice(&packet_rest.unwrap_or_default());
-            let mut trans_vec = std::vec![];
             let trans = Transmit {
                 destination: incoming.addresses.remote, // This will be replaced later by jls upstream address
                 ecn: incoming.ecn,
