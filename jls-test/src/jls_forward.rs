@@ -4,7 +4,7 @@ use std::{
     io::{self, Write},
     net::ToSocketAddrs,
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
     u32::MAX,
 };
 
@@ -202,13 +202,12 @@ async fn make_client(
     io::stdout().write_all(&resp).unwrap();
     io::stdout().flush().unwrap();
     conn.close(0u32.into(), b"done");
-
-    // Give the server a fair chance to receive the close packet
-    endpoint.wait_idle().await;
     Ok(())
 }
 #[test]
 fn jls_failed() {
+    let started = Instant::now();
+
     tracing::subscriber::set_global_default(
         tracing_subscriber::FmtSubscriber::builder()
             .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
@@ -245,8 +244,11 @@ fn jls_failed() {
             make_client(client_crypto.clone(), 4444, false, false)
                 .await
                 .unwrap();
-            tokio::time::sleep(Duration::from_millis(2000)).await;
         });
 
-    ()
+    assert!(
+        started.elapsed() < Duration::from_millis(500),
+        "test took {:?}, expected it to finish within 500ms",
+        started.elapsed()
+    );
 }
