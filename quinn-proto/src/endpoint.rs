@@ -16,7 +16,7 @@ use tracing::{debug, error, trace, warn};
 
 use crate::{
     cid_generator::ConnectionIdGenerator, coding::BufMutExt, config::{ClientConfig, EndpointConfig, ServerConfig}, connection::{Connection, ConnectionError, JlsAuthInner, SideArgs}, crypto::{self, Keys, UnsupportedVersion}, frame, packet::{
-        FixedLengthConnectionIdParser, Header, InitialHeader, InitialPacket, Packet, PacketDecodeError, PacketNumber, PartialDecode, ProtectedInitialHeader
+        FixedLengthConnectionIdParser, Header, InitialHeader, InitialPacket, PacketDecodeError, PacketNumber, PartialDecode, ProtectedInitialHeader
     }, shared::{
         ConnectionEvent, ConnectionEventInner, ConnectionId, DatagramConnectionEvent, EcnCodepoint,
         EndpointEvent, EndpointEventInner, IssuedCid,
@@ -417,6 +417,12 @@ impl Endpoint {
         addresses: FourTuple,
         buf: &mut Vec<u8>,
     ) -> Option<DatagramEvent> {
+        let mut original_datagram = BytesMut::with_capacity(datagram_len);
+        original_datagram.extend_from_slice(event.first_decode.data());
+        if let Some(remaining) = &event.remaining {
+            original_datagram.extend_from_slice(remaining);
+        }
+
         let dst_cid = event.first_decode.dst_cid();
         let header = event.first_decode.initial_header().unwrap();
 
@@ -507,6 +513,7 @@ impl Endpoint {
             crypto,
             token,
             incoming_idx,
+            original_datagram,
             improper_drop_warner: IncomingImproperDropWarner,
         }))
     }
@@ -567,12 +574,6 @@ impl Endpoint {
                 ],
             }));
         }
-
-        let packet_clone: Packet = InitialPacket {
-            header: incoming.packet.header.clone(),
-            header_data: incoming.packet.header_data.clone(),
-            payload: incoming.packet.payload.clone(),
-        }.into();
 
         if incoming
             .crypto
@@ -642,11 +643,7 @@ impl Endpoint {
         let (fwd_buf, trans_vec) = {
             let mut trans_vec = std::vec![];
             let mut fwd_buf = std::vec![];
-            let packet_rest = incoming.rest.clone();
-
-            fwd_buf.extend_from_slice(&packet_clone.header_data);
-            fwd_buf.extend_from_slice(&packet_clone.payload);
-            fwd_buf.extend_from_slice(&packet_rest.unwrap_or_default());
+            fwd_buf.extend_from_slice(&incoming.original_datagram);
             let trans = Transmit {
                 destination: incoming.addresses.remote, // This will be replaced later by jls upstream address
                 ecn: incoming.ecn,
@@ -1233,6 +1230,7 @@ pub struct Incoming {
     crypto: Keys,
     token: IncomingToken,
     incoming_idx: usize,
+    original_datagram: BytesMut,
     improper_drop_warner: IncomingImproperDropWarner,
 }
 
