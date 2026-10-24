@@ -139,9 +139,10 @@ async fn make_client(
     eprintln!("connecting to {remote}");
 
     let conn = match endpoint.connect(remote, host)?.into_0rtt() {
-        Ok((conn, accpetd)) => {
+        Ok((conn)) => {
+            let accepted = conn.clone();
             tokio::spawn(async move {
-                assert!(accpetd.await == zero_rtt);
+                assert!(accepted.authenticated().await.is_ok());
                 info!("0-RTT data accepted");
             });
             conn

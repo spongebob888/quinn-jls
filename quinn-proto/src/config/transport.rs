@@ -41,6 +41,7 @@ pub struct TransportConfig {
     pub(crate) mtu_discovery_config: Option<MtuDiscoveryConfig>,
     pub(crate) pad_to_mtu: bool,
     pub(crate) ack_frequency_config: Option<AckFrequencyConfig>,
+    pub(crate) max_outgoing_bytes_per_second: Option<u64>,
 
     pub(crate) persistent_congestion_threshold: u32,
     pub(crate) keep_alive_interval: Option<Duration>,
@@ -127,12 +128,18 @@ impl TransportConfig {
         self
     }
 
-    /// Maximum number of bytes to transmit to a peer without acknowledgment
+    /// Maximum number of bytes retained from application writes across all streams of a connection
     ///
-    /// Provides an upper bound on memory when communicating with peers that issue large amounts of
-    /// flow control credit. Endpoints that wish to handle large numbers of connections robustly
-    /// should take care to set this low enough to guarantee memory exhaustion does not occur if
-    /// every connection uses the entire window.
+    /// Acknowledged data continues to count against this limit until its storage is released. This
+    /// can keep writes blocked while earlier data is awaiting acknowledgment or only part of a buffer
+    /// has been acknowledged.
+    ///
+    /// Limits memory use when communicating with peers that issue large amounts of flow control
+    /// credit. Endpoints that wish to handle large numbers of connections robustly should take care
+    /// to set this low enough to avoid memory exhaustion if every connection uses the entire window.
+    ///
+    /// The limit counts bytes accepted from application buffers. Slices of larger allocations can
+    /// retain more memory than this limit accounts for.
     pub fn send_window(&mut self, value: u64) -> &mut Self {
         self.send_window = value;
         self
@@ -195,11 +202,12 @@ impl TransportConfig {
     /// Must be at least 1200, which is the default, and lower than or equal to
     /// [`TransportConfig::initial_mtu`].
     ///
+    /// Client Initial datagrams and ack-eliciting server Initial datagrams are padded to at least
+    /// this size, subject to the peer's maximum UDP payload size.
+    ///
     /// Real-world MTUs can vary according to ISP, VPN, and properties of intermediate network links
-    /// outside of either endpoint's control. Extreme care should be used when raising this value
-    /// outside of private networks where these factors are fully controlled. If the provided value
-    /// is higher than what the network path actually supports, the result will be unpredictable and
-    /// catastrophic packet loss, without a possibility of repair. Prefer
+    /// outside of either endpoint's control. If this value exceeds what the network path supports,
+    /// connections may fail to be established because Initial datagrams cannot be delivered. Prefer
     /// [`TransportConfig::initial_mtu`] together with
     /// [`TransportConfig::mtu_discovery_config`] to set a maximum UDP payload size that robustly
     /// adapts to the network.
@@ -243,6 +251,14 @@ impl TransportConfig {
         self
     }
 
+    /// Configures an outbound rate limit (in bytes per second) for each connection.
+    ///
+    /// Defaults to `None`, which disables rate limiting.
+    pub fn max_outgoing_bytes_per_second(&mut self, value: Option<u64>) -> &mut Self {
+        self.max_outgoing_bytes_per_second = value;
+        self
+    }
+
     /// Number of consecutive PTOs after which network is considered to be experiencing persistent congestion.
     pub fn persistent_congestion_threshold(&mut self, value: u32) -> &mut Self {
         self.persistent_congestion_threshold = value;
@@ -282,6 +298,8 @@ impl TransportConfig {
     /// The peer is forbidden to send single datagrams larger than this size. If the aggregate size
     /// of all datagrams that have been received from the peer but not consumed by the application
     /// exceeds this value, old datagrams are dropped until it is no longer exceeded.
+    ///
+    /// The amount of payload data buffered may be smaller than `value` due to overhead.
     pub fn datagram_receive_buffer_size(&mut self, value: Option<usize>) -> &mut Self {
         self.datagram_receive_buffer_size = value;
         self
@@ -293,6 +311,8 @@ impl TransportConfig {
     /// than the link, or even the underlying hardware, can transmit them. This limits the amount of
     /// memory that may be consumed in that case. When the send buffer is full and a new datagram is
     /// sent, older datagrams are dropped until sufficient space is available.
+    ///
+    /// The amount of payload data buffered may be smaller than `value` due to overhead.
     pub fn datagram_send_buffer_size(&mut self, value: usize) -> &mut Self {
         self.datagram_send_buffer_size = value;
         self
@@ -376,6 +396,7 @@ impl Default for TransportConfig {
             mtu_discovery_config: Some(MtuDiscoveryConfig::default()),
             pad_to_mtu: false,
             ack_frequency_config: None,
+            max_outgoing_bytes_per_second: None,
 
             persistent_congestion_threshold: 3,
             keep_alive_interval: None,
@@ -413,6 +434,7 @@ impl fmt::Debug for TransportConfig {
             mtu_discovery_config,
             pad_to_mtu,
             ack_frequency_config,
+            max_outgoing_bytes_per_second,
             persistent_congestion_threshold,
             keep_alive_interval,
             crypto_buffer_size,
@@ -442,6 +464,10 @@ impl fmt::Debug for TransportConfig {
             .field("mtu_discovery_config", mtu_discovery_config)
             .field("pad_to_mtu", pad_to_mtu)
             .field("ack_frequency_config", ack_frequency_config)
+            .field(
+                "max_outgoing_bytes_per_second",
+                max_outgoing_bytes_per_second,
+            )
             .field(
                 "persistent_congestion_threshold",
                 persistent_congestion_threshold,
@@ -580,28 +606,25 @@ impl QlogConfig {
 
         let writer = self.writer?;
         let trace = qlog::TraceSeq::new(
-            qlog::VantagePoint {
+            self.title.clone(),
+            self.description.clone(),
+            None,
+            Some(qlog::VantagePoint {
                 name: None,
                 ty: qlog::VantagePointType::Unknown,
                 flow: None,
-            },
-            self.title.clone(),
-            self.description.clone(),
-            Some(qlog::Configuration {
-                time_offset: Some(0.0),
-                original_uris: None,
             }),
-            None,
+            vec![],
         );
 
         let mut streamer = QlogStreamer::new(
-            qlog::QLOG_VERSION.into(),
             self.title,
             self.description,
-            None,
             self.start_time,
             trace,
             qlog::events::EventImportance::Core,
+            // `Instant` should have sub-microsecond precision on most platforms
+            qlog::streamer::EventTimePrecision::NanoSeconds,
             writer,
         );
 
@@ -781,7 +804,7 @@ impl From<VarInt> for IdleTimeout {
     }
 }
 
-impl std::convert::TryFrom<Duration> for IdleTimeout {
+impl TryFrom<Duration> for IdleTimeout {
     type Error = VarIntBoundsExceeded;
 
     fn try_from(timeout: Duration) -> Result<Self, Self::Error> {

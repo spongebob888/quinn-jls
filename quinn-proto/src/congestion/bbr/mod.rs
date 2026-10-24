@@ -2,7 +2,8 @@ use std::any::Any;
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use rand::{Rng, SeedableRng};
+use rand::{RngExt, SeedableRng};
+use rand_pcg::Pcg32;
 
 use crate::congestion::ControllerMetrics;
 use crate::congestion::bbr::bw_estimation::BandwidthEstimation;
@@ -56,7 +57,7 @@ pub struct Bbr {
     bw_at_last_round: u64,
     round_wo_bw_gain: u64,
     ack_aggregation: AckAggregationState,
-    random_number_generator: rand::rngs::StdRng,
+    random_number_generator: Pcg32,
 }
 
 impl Bbr {
@@ -97,7 +98,7 @@ impl Bbr {
             bw_at_last_round: 0,
             round_wo_bw_gain: 0,
             ack_aggregation: AckAggregationState::default(),
-            random_number_generator: rand::rngs::StdRng::from_os_rng(),
+            random_number_generator: Pcg32::from_rng(&mut rand::rng()),
         }
     }
 
@@ -492,10 +493,13 @@ impl Controller for Bbr {
     }
 
     fn metrics(&self) -> ControllerMetrics {
+        let bandwidth_estimate = self.max_bandwidth.get_estimate();
         ControllerMetrics {
             congestion_window: self.window(),
             ssthresh: None,
             pacing_rate: Some(self.pacing_rate * 8),
+            bandwidth_estimate: (bandwidth_estimate != 0)
+                .then(|| bandwidth_estimate.saturating_mul(8)),
         }
     }
 
@@ -649,3 +653,26 @@ const K_MAX_INITIAL_CONGESTION_WINDOW: u64 = 200;
 
 const PROBE_RTT_BASED_ON_BDP: bool = true;
 const DRAIN_TO_TARGET: bool = true;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn metrics_report_bandwidth_estimate() {
+        let mut bbr = Bbr::new(Arc::new(BbrConfig::default()), 1200);
+        assert_eq!(bbr.metrics().bandwidth_estimate, None);
+
+        let start = Instant::now();
+        let interval = Duration::from_millis(10);
+        bbr.max_bandwidth.on_sent(start, 1200);
+        bbr.max_bandwidth.on_sent(start + interval, 1200);
+        bbr.max_bandwidth
+            .on_ack(start + interval * 2, start, 1200, 0, false);
+        bbr.max_bandwidth.on_sent(start + interval * 2, 1200);
+        bbr.max_bandwidth
+            .on_ack(start + interval * 3, start + interval, 1200, 0, false);
+
+        assert_eq!(bbr.metrics().bandwidth_estimate, Some(960_000));
+    }
+}

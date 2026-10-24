@@ -14,8 +14,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
 use proto::crypto::rustls::QuicServerConfig;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, pem::PemObject};
+use tracing::instrument::Instrument as _;
 use tracing::{error, info, info_span};
-use tracing_futures::Instrument as _;
 
 mod common;
 
@@ -100,7 +100,7 @@ async fn run(options: Opt) -> Result<()> {
                 CertificateDer::from(cert),
                 PrivateKeyDer::try_from(key).map_err(anyhow::Error::msg)?,
             ),
-            Err(ref e) if e.kind() == io::ErrorKind::NotFound => {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
                 info!("generating self-signed certificate");
                 let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
                 let key = PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der());

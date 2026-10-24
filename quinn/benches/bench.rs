@@ -8,7 +8,7 @@ use bencher::{Bencher, benchmark_group, benchmark_main};
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use tokio::runtime::{Builder, Runtime};
 use tracing::error_span;
-use tracing_futures::Instrument as _;
+use tracing::instrument::Instrument as _;
 
 use quinn::{Endpoint, TokioRuntime};
 
@@ -142,7 +142,7 @@ impl Context {
     pub(crate) fn make_client(
         &self,
         server_addr: SocketAddr,
-    ) -> (quinn::Endpoint, quinn::Connection, Runtime) {
+    ) -> (Endpoint, quinn::Connection, Runtime) {
         let runtime = rt();
         let endpoint = {
             let _guard = runtime.enter();

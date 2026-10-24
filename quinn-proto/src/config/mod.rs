@@ -74,11 +74,11 @@ impl EndpointConfig {
     /// information in local connection IDs, e.g. to support stateless packet-level load balancers.
     ///
     /// Defaults to [`HashedConnectionIdGenerator`].
-    pub fn cid_generator<F: Fn() -> Box<dyn ConnectionIdGenerator> + Send + Sync + 'static>(
+    pub fn cid_generator(
         &mut self,
-        factory: F,
+        factory: Arc<dyn Fn() -> Box<dyn ConnectionIdGenerator> + Send + Sync>,
     ) -> &mut Self {
-        self.connection_id_generator_factory = Arc::new(factory);
+        self.connection_id_generator_factory = factory;
         self
     }
 
@@ -179,7 +179,7 @@ impl Default for EndpointConfig {
     fn default() -> Self {
         #[cfg(all(feature = "aws-lc-rs", not(feature = "ring")))]
         use aws_lc_rs::hmac;
-        use rand::RngCore;
+        use rand::Rng;
         #[cfg(feature = "ring")]
         use ring::hmac;
 
@@ -310,13 +310,13 @@ impl ServerConfig {
         self
     }
 
-    /// Maximum number of [`Incoming`][crate::Incoming] to allow to exist at a time
+    /// Maximum number of incoming connection attempts to hold before they become active
     ///
-    /// An [`Incoming`][crate::Incoming] comes into existence when an incoming connection attempt
-    /// is received and stops existing when the application either accepts it or otherwise disposes
-    /// of it. While this limit is reached, new incoming connection attempts are immediately
-    /// refused. Larger values have greater worst-case memory consumption, but accommodate greater
-    /// application latency in handling incoming connection attempts.
+    /// An attempt counts toward this limit from the time its initial packet is received until it is
+    /// either registered as an active connection or otherwise disposed of. While this limit is
+    /// reached, new incoming connection attempts are not admitted. Larger values have greater
+    /// worst-case memory consumption, but accommodate greater application latency in handling
+    /// incoming connection attempts.
     ///
     /// The default value is set to 65536. With a typical Ethernet MTU of 1500 bytes, this limits
     /// memory consumption from this to under 100 MiB--a generous amount that still prevents memory
@@ -326,13 +326,11 @@ impl ServerConfig {
         self
     }
 
-    /// Maximum number of received bytes to buffer for each [`Incoming`][crate::Incoming]
+    /// Maximum number of received bytes to buffer for each incoming connection attempt
     ///
-    /// An [`Incoming`][crate::Incoming] comes into existence when an incoming connection attempt
-    /// is received and stops existing when the application either accepts it or otherwise disposes
-    /// of it. This limit governs only packets received within that period, and does not include
-    /// the first packet. Packets received in excess of this limit are dropped, which may cause
-    /// 0-RTT or handshake data to have to be retransmitted.
+    /// This limit governs packets received after the first packet and before the attempt is either
+    /// registered as an active connection or otherwise disposed of. Packets received in excess of
+    /// this limit are dropped, which may cause 0-RTT or handshake data to have to be retransmitted.
     ///
     /// The default value is set to 10 MiB--an amount such that in most situations a client would
     /// not transmit that much 0-RTT data faster than the server handles the corresponding
@@ -342,14 +340,12 @@ impl ServerConfig {
         self
     }
 
-    /// Maximum number of received bytes to buffer for all [`Incoming`][crate::Incoming]
-    /// collectively
+    /// Maximum number of received bytes to buffer collectively for all incoming connection attempts
     ///
-    /// An [`Incoming`][crate::Incoming] comes into existence when an incoming connection attempt
-    /// is received and stops existing when the application either accepts it or otherwise disposes
-    /// of it. This limit governs only packets received within that period, and does not include
-    /// the first packet. Packets received in excess of this limit are dropped, which may cause
-    /// 0-RTT or handshake data to have to be retransmitted.
+    /// This limit governs packets received after each attempt's first packet and before the attempt
+    /// is either registered as an active connection or otherwise disposed of. Packets received in
+    /// excess of this limit are dropped, which may cause 0-RTT or handshake data to have to be
+    /// retransmitted.
     ///
     /// The default value is set to 100 MiB--a generous amount that still prevents memory
     /// exhaustion in most contexts.
@@ -396,7 +392,7 @@ impl ServerConfig {
     pub fn with_crypto(crypto: Arc<dyn crypto::ServerConfig>) -> Self {
         #[cfg(all(feature = "aws-lc-rs", not(feature = "ring")))]
         use aws_lc_rs::hkdf;
-        use rand::RngCore;
+        use rand::Rng;
         #[cfg(feature = "ring")]
         use ring::hkdf;
 

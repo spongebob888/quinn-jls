@@ -260,10 +260,7 @@ impl RecvStream {
     pub async fn read_to_end(&mut self, size_limit: usize) -> Result<Vec<u8>, ReadToEndError> {
         ReadToEnd {
             stream: self,
-            size_limit,
-            read: Vec::new(),
-            start: u64::MAX,
-            end: 0,
+            buffer: ReadToEndBuffer::new(size_limit),
         }
         .await
     }
@@ -286,10 +283,16 @@ impl RecvStream {
         Ok(())
     }
 
-    /// Check if this stream has been opened during 0-RTT.
+    /// Check if this stream predates completion of the handshake on an incoming connection.
     ///
-    /// In which case any non-idempotent request should be considered dangerous at the application
-    /// level. Because read data is subject to replay attacks.
+    /// True only if the stream was accepted before the handshake completed, which is only possible
+    /// if you successfully called [`Connecting::into_0rtt`](crate::Connecting::into_0rtt) and the
+    /// client chose to send 0-RTT data.
+    ///
+    /// Under those conditions, depending on cryptographic layer configuration, 0-RTT application
+    /// data may be a replay attack. To guard against this, applications should not execute
+    /// non-idempotent operations until
+    /// [`Connection::authenticated`](crate::Connection::authenticated) succeeds.
     pub fn is_0rtt(&self) -> bool {
         self.is_0rtt
     }
@@ -358,6 +361,8 @@ impl RecvStream {
         T: FnMut(&mut Chunks<'_>) -> ReadStatus<U>,
     {
         use proto::ReadError::*;
+        use std::collections::hash_map::Entry;
+
         if self.all_data_read {
             return Poll::Ready(Ok(None));
         }
@@ -386,15 +391,24 @@ impl RecvStream {
             ReadStatus::Readable(read) => Poll::Ready(Ok(Some(read))),
             ReadStatus::Finished(read) => {
                 self.all_data_read = true;
+                // Stream is dead, cleanup stale waker
+                conn.blocked_readers.remove(&self.stream);
                 Poll::Ready(Ok(read))
             }
             ReadStatus::Failed(read, Blocked) => match read {
                 Some(val) => Poll::Ready(Ok(Some(val))),
                 None => {
-                    if let Some(ref x) = conn.error {
+                    if let Some(x) = &conn.error {
                         return Poll::Ready(Err(ReadError::ConnectionLost(x.clone())));
                     }
-                    conn.blocked_readers.insert(self.stream, cx.waker().clone());
+                    match conn.blocked_readers.entry(self.stream) {
+                        Entry::Occupied(mut entry) => {
+                            entry.get_mut().clone_from(cx.waker());
+                        }
+                        Entry::Vacant(entry) => {
+                            entry.insert(cx.waker().clone());
+                        }
+                    }
                     Poll::Pending
                 }
             },
@@ -402,6 +416,8 @@ impl RecvStream {
                 None => {
                     self.all_data_read = true;
                     self.reset = Some(error_code);
+                    // Stream is dead, cleanup stale waker
+                    conn.blocked_readers.remove(&self.stream);
                     Poll::Ready(Err(ReadError::Reset(error_code)))
                 }
                 done => {
@@ -433,10 +449,7 @@ impl<T> From<(Option<T>, Option<proto::ReadError>)> for ReadStatus<T> {
 /// [`RecvStream::read_to_end()`]: crate::RecvStream::read_to_end
 struct ReadToEnd<'a> {
     stream: &'a mut RecvStream,
-    read: Vec<(Bytes, u64)>,
-    start: u64,
-    end: u64,
-    size_limit: usize,
+    buffer: ReadToEndBuffer,
 }
 
 impl Future for ReadToEnd<'_> {
@@ -444,30 +457,50 @@ impl Future for ReadToEnd<'_> {
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         loop {
             match ready!(self.stream.poll_read_chunk(cx, usize::MAX, false))? {
-                Some(chunk) => {
-                    self.start = self.start.min(chunk.offset);
-                    let end = chunk.bytes.len() as u64 + chunk.offset;
-                    if (end - self.start) > self.size_limit as u64 {
-                        return Poll::Ready(Err(ReadToEndError::TooLong));
-                    }
-                    self.end = self.end.max(end);
-                    self.read.push((chunk.bytes, chunk.offset));
-                }
-                None => {
-                    if self.end == 0 {
-                        // Never received anything
-                        return Poll::Ready(Ok(Vec::new()));
-                    }
-                    let start = self.start;
-                    let mut buffer = vec![0; (self.end - start) as usize];
-                    for (data, offset) in self.read.drain(..) {
-                        let offset = (offset - start) as usize;
-                        buffer[offset..offset + data.len()].copy_from_slice(&data);
-                    }
-                    return Poll::Ready(Ok(buffer));
-                }
+                Some(chunk) => self.buffer.push(chunk)?,
+                None => return Poll::Ready(Ok(self.buffer.finish())),
             }
         }
+    }
+}
+
+struct ReadToEndBuffer {
+    read: Vec<(Bytes, u64)>,
+    start: u64,
+    end: u64,
+    size_limit: usize,
+}
+
+impl ReadToEndBuffer {
+    fn new(size_limit: usize) -> Self {
+        Self {
+            read: Vec::new(),
+            start: u64::MAX,
+            end: 0,
+            size_limit,
+        }
+    }
+
+    fn push(&mut self, chunk: Chunk) -> Result<(), ReadToEndError> {
+        self.start = self.start.min(chunk.offset);
+        self.end = self.end.max(chunk.bytes.len() as u64 + chunk.offset);
+        if (self.end - self.start) > self.size_limit as u64 {
+            return Err(ReadToEndError::TooLong);
+        }
+        self.read.push((chunk.bytes, chunk.offset));
+        Ok(())
+    }
+
+    fn finish(&mut self) -> Vec<u8> {
+        if self.end == 0 {
+            return Vec::new();
+        }
+        let mut buffer = vec![0; (self.end - self.start) as usize];
+        for (data, offset) in self.read.drain(..) {
+            let offset = (offset - self.start) as usize;
+            buffer[offset..offset + data.len()].copy_from_slice(&data);
+        }
+        buffer
     }
 }
 
@@ -517,7 +550,7 @@ impl Drop for RecvStream {
                     .blocked_readers
                     .contains_key(&self.stream),
                 "Stream {} should not have a blocked reader when all data read is true",
-                &self.stream
+                self.stream
             );
             return;
         }
@@ -710,5 +743,81 @@ impl Future for ReadChunks<'_> {
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
         this.stream.poll_read_chunks(cx, this.bufs)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_to_end_reordered_limit() {
+        let mut buffer = ReadToEndBuffer::new(4);
+        buffer
+            .push(Chunk {
+                offset: 4,
+                bytes: Bytes::from_static(b"efgh"),
+            })
+            .unwrap();
+        assert_eq!(
+            buffer.push(Chunk {
+                offset: 0,
+                bytes: Bytes::from_static(b"abcd")
+            }),
+            Err(ReadToEndError::TooLong)
+        );
+        assert_eq!(buffer.read.len(), 1);
+    }
+
+    #[test]
+    fn read_to_end_reordered_exact_limit_after_prefix() {
+        let mut buffer = ReadToEndBuffer::new(8);
+        // A previously consumed prefix must not count against the remaining-data limit.
+        buffer
+            .push(Chunk {
+                offset: 104,
+                bytes: Bytes::from_static(b"efgh"),
+            })
+            .unwrap();
+        buffer
+            .push(Chunk {
+                offset: 100,
+                bytes: Bytes::from_static(b"abcd"),
+            })
+            .unwrap();
+        assert_eq!(buffer.finish(), b"abcdefgh");
+    }
+
+    #[test]
+    fn read_to_end_gaps_and_empty() {
+        assert!(ReadToEndBuffer::new(0).finish().is_empty());
+        let mut buffer = ReadToEndBuffer::new(5);
+        buffer
+            .push(Chunk {
+                offset: 14,
+                bytes: Bytes::from_static(b"e"),
+            })
+            .unwrap();
+        buffer
+            .push(Chunk {
+                offset: 10,
+                bytes: Bytes::from_static(b"a"),
+            })
+            .unwrap();
+        assert_eq!(buffer.finish(), b"a\0\0\0e");
+        let mut buffer = ReadToEndBuffer::new(4);
+        buffer
+            .push(Chunk {
+                offset: 10,
+                bytes: Bytes::from_static(b"a"),
+            })
+            .unwrap();
+        assert_eq!(
+            buffer.push(Chunk {
+                offset: 14,
+                bytes: Bytes::from_static(b"e")
+            }),
+            Err(ReadToEndError::TooLong)
+        );
     }
 }

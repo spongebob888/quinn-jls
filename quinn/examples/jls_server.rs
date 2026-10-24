@@ -17,8 +17,7 @@ use rustls::{
     jls::JlsServerConfig,
     pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, pem::PemObject},
 };
-use tracing::{error, info, info_span};
-use tracing_futures::Instrument as _;
+use tracing::{Instrument, error, info, info_span};
 
 mod common;
 

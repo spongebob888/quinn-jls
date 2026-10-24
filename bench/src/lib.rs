@@ -11,8 +11,8 @@ use bytes::Bytes;
 use clap::Parser;
 use quinn::crypto::rustls::QuicClientConfig;
 use rustls::{
-    RootCertStore,
     pki_types::{CertificateDer, PrivateKeyDer},
+    RootCertStore,
 };
 use tokio::runtime::{Builder, Runtime};
 use tracing::trace;
@@ -30,7 +30,7 @@ pub fn configure_tracing_subscriber() {
 
 /// Creates a server endpoint which runs on the given runtime
 pub fn server_endpoint(
-    rt: &tokio::runtime::Runtime,
+    rt: &Runtime,
     cert: CertificateDer<'static>,
     key: PrivateKeyDer<'static>,
     opt: &Opt,

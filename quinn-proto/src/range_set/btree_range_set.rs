@@ -35,11 +35,11 @@ impl RangeSet {
                     // Extend existing
                     self.0.remove(&start);
                     let mut new_end = x + 1;
-                    if let Some((next_start, next_end)) = self.succ(x) {
-                        if next_start == new_end {
-                            self.0.remove(&next_start);
-                            new_end = next_end;
-                        }
+                    if let Some((next_start, next_end)) = self.succ(x)
+                        && next_start == new_end
+                    {
+                        self.0.remove(&next_start);
+                        new_end = next_end;
                     }
                     self.0.insert(start, new_end);
                     return true;
@@ -48,11 +48,11 @@ impl RangeSet {
             }
         }
         let mut new_end = x + 1;
-        if let Some((next_start, next_end)) = self.succ(x) {
-            if next_start == new_end {
-                self.0.remove(&next_start);
-                new_end = next_end;
-            }
+        if let Some((next_start, next_end)) = self.succ(x)
+            && next_start == new_end
+        {
+            self.0.remove(&next_start);
+            new_end = next_end;
         }
         self.0.insert(x, new_end);
         true
@@ -324,6 +324,9 @@ impl Iterator for Replace<'_> {
 
 impl Drop for Replace<'_> {
     fn drop(&mut self) {
+        if self.range.is_empty() {
+            return;
+        }
         // Ensure we drain all remaining overlapping ranges
         for _ in &mut *self {}
         // Insert the final aggregate range
@@ -391,5 +394,15 @@ mod tests {
         assert_eq!(set.replace(0..2).collect::<Vec<_>>(), &[]);
         assert_eq!(set.len(), 1);
         assert_eq!(set.peek_min().unwrap(), 0..4);
+    }
+
+    #[test]
+    fn replace_empty() {
+        let mut set = RangeSet::new();
+        set.replace(3..3);
+        set.replace(6..10);
+        set.replace(5..5);
+        set.replace(2..7);
+        assert_eq!(set.0, [(2, 10)].into_iter().collect());
     }
 }

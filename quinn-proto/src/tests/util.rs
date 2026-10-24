@@ -21,7 +21,7 @@ use tracing::{info_span, trace};
 
 use super::crypto::rustls::{QuicClientConfig, QuicServerConfig, configured_provider};
 use super::*;
-use crate::{Duration, Instant};
+use crate::{Accepting, Duration, Instant};
 
 pub(super) const DEFAULT_MTU: usize = 1452;
 
@@ -146,7 +146,7 @@ impl Pair {
                 self.spins += (spin == self.last_spin) as u64;
                 self.last_spin = spin;
             }
-            if let Some(ref socket) = self.client.socket {
+            if let Some(socket) = &self.client.socket {
                 socket.send_to(&buffer, packet.destination).unwrap();
             }
             if self.server.addr == packet.destination {
@@ -170,7 +170,7 @@ impl Pair {
                 info!(packet_size, "dropping packet (max size exceeded)");
                 continue;
             }
-            if let Some(ref socket) = self.server.socket {
+            if let Some(socket) = &self.server.socket {
                 socket.send_to(&buffer, packet.destination).unwrap();
             }
             if self.client.addr == packet.destination {
@@ -212,7 +212,11 @@ impl Pair {
         client_ch
     }
 
-    fn finish_connect(&mut self, client_ch: ConnectionHandle, server_ch: ConnectionHandle) {
+    pub(super) fn finish_connect(
+        &mut self,
+        client_ch: ConnectionHandle,
+        server_ch: ConnectionHandle,
+    ) {
         assert_matches!(
             self.client_conn_mut(client_ch).poll(),
             Some(Event::HandshakeDataReady)
@@ -354,7 +358,7 @@ impl TestEndpoint {
     }
 
     pub(super) fn drive_incoming(&mut self, now: Instant, remote: SocketAddr) {
-        if let Some(ref socket) = self.socket {
+        if let Some(socket) = &self.socket {
             loop {
                 let mut buf = [0; 8192];
                 if socket.recv_from(&mut buf).is_err() {
@@ -441,10 +445,10 @@ impl TestEndpoint {
             }
 
             for (ch, event) in endpoint_events {
-                if let Some(event) = self.handle_event(ch, event) {
-                    if let Some(conn) = self.connections.get_mut(&ch) {
-                        conn.handle_event(event);
-                    }
+                if let Some(event) = self.handle_event(ch, event)
+                    && let Some(conn) = self.connections.get_mut(&ch)
+                {
+                    conn.handle_event(event);
                 }
             }
         }
@@ -489,6 +493,38 @@ impl TestEndpoint {
                 Err(error.cause)
             }
         }
+    }
+
+    pub(super) fn pop_waiting_incoming(&mut self) -> Incoming {
+        let incoming = self.waiting_incoming.pop().unwrap();
+        assert!(self.waiting_incoming.is_empty());
+        incoming
+    }
+
+    pub(super) fn start_split_accept(&mut self, incoming: Incoming, now: Instant) -> Accepting {
+        let mut buf = Vec::new();
+        self.endpoint
+            .start_accept(incoming, now, &mut buf, None)
+            .unwrap()
+    }
+
+    pub(super) fn finish_split_accept(&mut self, accepting: Accepting) -> ConnectionHandle {
+        let mut buf = Vec::new();
+        let (ch, conn) = self
+            .endpoint
+            .finish_accept(accepting.accept(), &mut buf)
+            .expect("split accept unexpectedly failed");
+        self.connections.insert(ch, conn);
+        ch
+    }
+
+    /// Like `finish_split_accept`, but expects the handshake to fail, returning the cause
+    pub(super) fn finish_split_accept_error(&mut self, accepting: Accepting) -> ConnectionError {
+        let mut buf = Vec::new();
+        let Err(error) = self.endpoint.finish_accept(accepting.accept(), &mut buf) else {
+            panic!("split accept unexpectedly succeeded")
+        };
+        error.cause
     }
 
     pub(super) fn retry(&mut self, incoming: Incoming) {
@@ -559,6 +595,23 @@ impl Write for TestWriter {
     }
     fn flush(&mut self) -> io::Result<()> {
         io::stdout().flush()
+    }
+}
+
+/// A writer whose output can be read back, e.g. to inspect a qlog trace
+#[cfg(feature = "qlog")]
+#[derive(Clone, Default)]
+pub(super) struct SharedBuffer(pub(super) Arc<Mutex<Vec<u8>>>);
+
+#[cfg(feature = "qlog")]
+impl Write for SharedBuffer {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -647,7 +700,7 @@ fn client_crypto_inner(
     certs: Option<Vec<CertificateDer<'static>>>,
     alpn: Option<Vec<Vec<u8>>>,
 ) -> QuicClientConfig {
-    let mut roots = rustls::RootCertStore::empty();
+    let mut roots = RootCertStore::empty();
     for cert in certs.unwrap_or_else(|| vec![CERTIFIED_KEY.cert.der().clone()]) {
         roots.add(cert).unwrap();
     }

@@ -50,6 +50,7 @@ lru-slab = { workspace = true }
 qlog = { workspace = true, optional = true }
 rustc-hash = { workspace = true }
 rand = { workspace = true }
+rand_pcg = "0.10"
 ring = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true }
 rustls-platform-verifier = { workspace = true, optional = true }
@@ -61,7 +62,7 @@ tracing = { workspace = true }
 # Feature flags & dependencies for wasm
 # wasm-bindgen is assumed for a wasm*-*-unknown target
 [target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dependencies]
-ring = { workspace = true, features = ["wasm32_unknown_unknown_js"] }
+ring = { workspace = true, features = ["wasm32_unknown_unknown_js"], optional = true }
 getrandom = { workspace = true, features = ["wasm_js"] }
 rustls-pki-types = { workspace = true, features = ["web"] } # only added as dependency to enforce the `web` feature for this target
 web-time = { workspace = true }
@@ -69,7 +70,6 @@ web-time = { workspace = true }
 [dev-dependencies]
 assert_matches = { workspace = true }
 hex-literal = { workspace = true  }
-rand_pcg = "0.9"
 rcgen = { workspace = true }
 tracing-subscriber = { workspace = true }
 wasm-bindgen-test = { workspace = true }

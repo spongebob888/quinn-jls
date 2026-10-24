@@ -1,4 +1,4 @@
-//! Low-level protocol logic for the QUIC protoocol
+//! Low-level protocol logic for the QUIC protocol
 //!
 //! quinn-proto contains a fully deterministic implementation of QUIC protocol logic. It contains
 //! no networking code and does not get any relevant timestamps from the operating system. Most
@@ -71,7 +71,8 @@ pub use crate::frame::{ApplicationClose, ConnectionClose, Datagram, FrameType};
 
 mod endpoint;
 pub use crate::endpoint::{
-    AcceptError, ConnectError, ConnectionHandle, DatagramEvent, Endpoint, Incoming, RetryError,
+    AcceptError, Accepted, Accepting, ConnectError, ConnectionHandle, DatagramEvent, Endpoint,
+    Incoming, RetryError,
 };
 
 mod packet;
