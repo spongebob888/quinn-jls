@@ -49,10 +49,14 @@ impl MtuDiscovery {
     }
 
     fn with_state(current_mtu: u16, min_mtu: u16, state: Option<EnabledMtuDiscovery>) -> Self {
+        let black_hole_threshold = state.as_ref().map_or_else(
+            || MtuDiscoveryConfig::default().black_hole_threshold,
+            |state| state.config.black_hole_threshold,
+        );
         Self {
             current_mtu,
             state,
-            black_hole_detector: BlackHoleDetector::new(min_mtu),
+            black_hole_detector: BlackHoleDetector::new(min_mtu, black_hole_threshold),
         }
     }
 
@@ -62,7 +66,8 @@ impl MtuDiscovery {
             self.state = Some(EnabledMtuDiscovery::new(state.config));
             self.on_peer_max_udp_payload_size_received(state.peer_max_udp_payload_size);
         }
-        self.black_hole_detector = BlackHoleDetector::new(min_mtu);
+        self.black_hole_detector =
+            BlackHoleDetector::new(min_mtu, self.black_hole_detector.black_hole_threshold);
     }
 
     /// Returns the current MTU
@@ -368,10 +373,12 @@ impl SearchState {
 /// minimum MTU or (b) smaller than a more recent acknowledged packet, because such a burst could be
 /// fully explained by a reduction in MTU.
 ///
-/// When the number of suspicious loss bursts exceeds [`BLACK_HOLE_THRESHOLD`], we judge the
-/// evidence for an MTU black hole to be sufficient.
+/// When the number of suspicious loss bursts exceeds [`MtuDiscoveryConfig::black_hole_threshold`],
+/// we judge the evidence for an MTU black hole to be sufficient.
 #[derive(Clone)]
 struct BlackHoleDetector {
+    /// Maximum number of suspicious loss bursts tolerated before detecting a black hole
+    black_hole_threshold: usize,
     /// Packet loss bursts currently considered suspicious
     suspicious_loss_bursts: Vec<LossBurst>,
     /// Loss burst currently being aggregated, if any
@@ -387,9 +394,10 @@ struct BlackHoleDetector {
 }
 
 impl BlackHoleDetector {
-    fn new(min_mtu: u16) -> Self {
+    fn new(min_mtu: u16, black_hole_threshold: usize) -> Self {
         Self {
-            suspicious_loss_bursts: Vec::with_capacity(BLACK_HOLE_THRESHOLD + 1),
+            black_hole_threshold,
+            suspicious_loss_bursts: Vec::new(),
             current_loss_burst: None,
             largest_post_loss_packet: 0,
             acked_mtu: min_mtu,
@@ -453,7 +461,7 @@ impl BlackHoleDetector {
     fn black_hole_detected(&mut self) -> bool {
         self.finish_loss_burst();
 
-        if self.suspicious_loss_bursts.len() <= BLACK_HOLE_THRESHOLD {
+        if self.suspicious_loss_bursts.len() <= self.black_hole_threshold {
             return false;
         }
 
@@ -490,7 +498,7 @@ impl BlackHoleDetector {
             smallest_packet_size: burst.smallest_packet_size,
         };
 
-        if self.suspicious_loss_bursts.len() <= BLACK_HOLE_THRESHOLD {
+        if self.suspicious_loss_bursts.len() <= self.black_hole_threshold {
             self.suspicious_loss_bursts.push(burst);
             return;
         }
@@ -531,8 +539,6 @@ struct CurrentLossBurst {
 // Corresponds to the RFC's `MAX_PROBES` constant (see
 // https://www.rfc-editor.org/rfc/rfc8899#section-5.1.2)
 const MAX_PROBE_RETRANSMITS: usize = 3;
-/// Maximum number of suspicious loss bursts that will not trigger black hole detection
-const BLACK_HOLE_THRESHOLD: usize = 6; // 3 is too small for high packet loss network(10%) which is triggered repeatedly
 
 #[cfg(test)]
 mod tests {
@@ -614,6 +620,54 @@ mod tests {
     }
 
     #[test]
+    fn configurable_black_hole_threshold() {
+        let now = Instant::now();
+        assert_eq!(MtuDiscoveryConfig::default().black_hole_threshold, 6);
+
+        for threshold in [0, 1, 3, 10] {
+            let mut config = MtuDiscoveryConfig::default();
+            config.black_hole_threshold(threshold);
+            let mut mtud = MtuDiscovery::new(1400, 1200, None, config);
+
+            assert!(!mtud.black_hole_detected(now));
+            // Even a zero threshold must ignore loss at the minimum MTU.
+            mtud.on_non_probe_lost(0, 1200);
+            assert!(!mtud.black_hole_detected(now));
+
+            for i in 0..threshold {
+                mtud.on_non_probe_lost((i as u64 + 1) * 2, 1400);
+                assert!(!mtud.black_hole_detected(now));
+                assert_eq!(mtud.current_mtu(), 1400);
+            }
+            mtud.on_non_probe_lost((threshold as u64 + 1) * 2, 1400);
+            assert!(mtud.black_hole_detected(now));
+            assert_eq!(mtud.current_mtu(), 1200);
+            assert!(!mtud.black_hole_detected(now));
+        }
+    }
+
+    #[test]
+    fn black_hole_threshold_survives_reset() {
+        let now = Instant::now();
+        let mut config = MtuDiscoveryConfig::default();
+        config.black_hole_threshold(2);
+        let mut mtud = MtuDiscovery::new(1400, 1200, None, config);
+
+        mtud.on_non_probe_lost(0, 1400);
+        assert!(!mtud.black_hole_detected(now));
+        mtud.reset(1400, 1250);
+
+        // Reset clears previous losses while preserving the configured threshold.
+        for i in 0..2 {
+            mtud.on_non_probe_lost(i * 2, 1400);
+            assert!(!mtud.black_hole_detected(now));
+        }
+        mtud.on_non_probe_lost(4, 1400);
+        assert!(mtud.black_hole_detected(now));
+        assert_eq!(mtud.current_mtu(), 1250);
+    }
+
+    #[test]
     fn mtu_discovery_disabled_does_nothing() {
         let mut mtud = MtuDiscovery::disabled(1_200, 1_200);
         let probe_size = mtud.poll_transmit(Instant::now(), 0);
@@ -622,10 +676,11 @@ mod tests {
 
     #[test]
     fn mtu_discovery_disabled_lost_four_packet_bursts_triggers_black_hole_detection() {
+        let threshold = MtuDiscoveryConfig::default().black_hole_threshold;
         let mut mtud = MtuDiscovery::disabled(1_400, 1_250);
         let now = Instant::now();
 
-        for i in 0..BLACK_HOLE_THRESHOLD as u64 + 1{
+        for i in 0..threshold as u64 + 1 {
             // The packets are never contiguous, so each one has its own burst
             mtud.on_non_probe_lost(i * 2, 1300);
         }
@@ -648,10 +703,11 @@ mod tests {
 
     #[test]
     fn mtu_discovery_lost_four_packet_bursts_triggers_black_hole_detection_and_resets_timer() {
+        let threshold = MtuDiscoveryConfig::default().black_hole_threshold;
         let mut mtud = default_mtud();
         let now = Instant::now();
 
-        for i in 0..BLACK_HOLE_THRESHOLD as u64 + 1 {
+        for i in 0..threshold as u64 + 1 {
             // The packets are never contiguous, so each one has its own burst
             mtud.on_non_probe_lost(i * 2, 1300);
         }
@@ -884,14 +940,15 @@ mod tests {
     // Loss of packets larger than have been acknowledged should indicate a black hole
     #[test]
     fn simple_black_hole_detection() {
-        let mut bhd = BlackHoleDetector::new(1200);
-        bhd.on_non_probe_acked((BLACK_HOLE_THRESHOLD + 1) as u64 * 2, 1300);
-        for i in 0..BLACK_HOLE_THRESHOLD {
+        let threshold = MtuDiscoveryConfig::default().black_hole_threshold;
+        let mut bhd = BlackHoleDetector::new(1200, threshold);
+        bhd.on_non_probe_acked((threshold + 1) as u64 * 2, 1300);
+        for i in 0..threshold {
             bhd.on_non_probe_lost(i as u64 * 2, 1400);
         }
-        // But not before `BLACK_HOLE_THRESHOLD + 1` bursts
+        // But not before `threshold + 1` bursts
         assert!(!bhd.black_hole_detected());
-        bhd.on_non_probe_lost(BLACK_HOLE_THRESHOLD as u64 * 2, 1400);
+        bhd.on_non_probe_lost(threshold as u64 * 2, 1400);
         assert!(bhd.black_hole_detected());
     }
 
@@ -899,9 +956,10 @@ mod tests {
     // indicate a black hole
     #[test]
     fn non_suspicious_bursts() {
-        let mut bhd = BlackHoleDetector::new(1200);
-        bhd.on_non_probe_acked((BLACK_HOLE_THRESHOLD + 1) as u64 * 2, 1500);
-        for i in 0..(BLACK_HOLE_THRESHOLD + 1) {
+        let threshold = MtuDiscoveryConfig::default().black_hole_threshold;
+        let mut bhd = BlackHoleDetector::new(1200, threshold);
+        bhd.on_non_probe_acked((threshold + 1) as u64 * 2, 1500);
+        for i in 0..(threshold + 1) {
             bhd.on_non_probe_lost(i as u64 * 2, 1400);
         }
         assert!(!bhd.black_hole_detected());
@@ -911,9 +969,10 @@ mod tests {
     // hole
     #[test]
     fn dynamic_mtu_reduction() {
-        let mut bhd = BlackHoleDetector::new(1200);
+        let threshold = MtuDiscoveryConfig::default().black_hole_threshold;
+        let mut bhd = BlackHoleDetector::new(1200, threshold);
         bhd.on_non_probe_acked(0, 1500);
-        for i in 0..(BLACK_HOLE_THRESHOLD + 1) {
+        for i in 0..(threshold + 1) {
             bhd.on_non_probe_lost(i as u64 * 2, 1400);
         }
         assert!(bhd.black_hole_detected());
@@ -922,9 +981,10 @@ mod tests {
     // Bursts containing heterogeneous packets are judged based on the smallest
     #[test]
     fn mixed_non_suspicious_bursts() {
-        let mut bhd = BlackHoleDetector::new(1200);
-        bhd.on_non_probe_acked((BLACK_HOLE_THRESHOLD + 1) as u64 * 3, 1400);
-        for i in 0..(BLACK_HOLE_THRESHOLD + 1) {
+        let threshold = MtuDiscoveryConfig::default().black_hole_threshold;
+        let mut bhd = BlackHoleDetector::new(1200, threshold);
+        bhd.on_non_probe_acked((threshold + 1) as u64 * 3, 1400);
+        for i in 0..(threshold + 1) {
             bhd.on_non_probe_lost(i as u64 * 3, 1500);
             bhd.on_non_probe_lost(i as u64 * 3 + 1, 1300);
         }
@@ -934,23 +994,25 @@ mod tests {
     // Multi-packet bursts are only counted once
     #[test]
     fn bursts_count_once() {
-        let mut bhd = BlackHoleDetector::new(1200);
-        bhd.on_non_probe_acked((BLACK_HOLE_THRESHOLD + 1) as u64 * 3, 1400);
-        for i in 0..(BLACK_HOLE_THRESHOLD) {
+        let threshold = MtuDiscoveryConfig::default().black_hole_threshold;
+        let mut bhd = BlackHoleDetector::new(1200, threshold);
+        bhd.on_non_probe_acked((threshold + 1) as u64 * 3, 1400);
+        for i in 0..(threshold) {
             bhd.on_non_probe_lost(i as u64 * 3, 1500);
             bhd.on_non_probe_lost(i as u64 * 3 + 1, 1500);
         }
         assert!(!bhd.black_hole_detected());
-        bhd.on_non_probe_lost(BLACK_HOLE_THRESHOLD as u64 * 3, 1500);
+        bhd.on_non_probe_lost(threshold as u64 * 3, 1500);
         assert!(bhd.black_hole_detected());
     }
 
     // Non-suspicious bursts don't interfere with detection of suspicious bursts
     #[test]
     fn interleaved_bursts() {
-        let mut bhd = BlackHoleDetector::new(1200);
-        bhd.on_non_probe_acked((BLACK_HOLE_THRESHOLD + 1) as u64 * 4, 1400);
-        for i in 0..(BLACK_HOLE_THRESHOLD + 1) {
+        let threshold = MtuDiscoveryConfig::default().black_hole_threshold;
+        let mut bhd = BlackHoleDetector::new(1200, threshold);
+        bhd.on_non_probe_acked((threshold + 1) as u64 * 4, 1400);
+        for i in 0..(threshold + 1) {
             bhd.on_non_probe_lost(i as u64 * 4, 1500);
             bhd.on_non_probe_lost(i as u64 * 4 + 2, 1300);
         }
@@ -960,17 +1022,18 @@ mod tests {
     // Bursts that are non-suspicious before a delivered packet become suspicious past it
     #[test]
     fn suspicious_after_acked() {
-        let mut bhd = BlackHoleDetector::new(1200);
-        bhd.on_non_probe_acked((BLACK_HOLE_THRESHOLD + 1) as u64 * 2, 1400);
-        for i in 0..(BLACK_HOLE_THRESHOLD + 1) {
+        let threshold = MtuDiscoveryConfig::default().black_hole_threshold;
+        let mut bhd = BlackHoleDetector::new(1200, threshold);
+        bhd.on_non_probe_acked((threshold + 1) as u64 * 2, 1400);
+        for i in 0..(threshold + 1) {
             bhd.on_non_probe_lost(i as u64 * 2, 1300);
         }
         assert!(
             !bhd.black_hole_detected(),
             "1300 byte losses preceding a 1400 byte delivery are not suspicious"
         );
-        for i in 0..(BLACK_HOLE_THRESHOLD + 1) {
-            bhd.on_non_probe_lost((BLACK_HOLE_THRESHOLD as u64 + 1 + i as u64) * 2, 1300);
+        for i in 0..(threshold + 1) {
+            bhd.on_non_probe_lost((threshold as u64 + 1 + i as u64) * 2, 1300);
         }
         assert!(
             bhd.black_hole_detected(),
@@ -985,13 +1048,14 @@ mod tests {
     // older losses.
     #[test]
     fn equal_size_delivery_clears_preceding_bursts() {
-        let mut bhd = BlackHoleDetector::new(1200);
+        let threshold = MtuDiscoveryConfig::default().black_hole_threshold;
+        let mut bhd = BlackHoleDetector::new(1200, threshold);
         // A full-size packet was delivered long ago...
         bhd.on_non_probe_acked(0, 1400);
         // ...and a newer full-size packet is delivered now, before loss detection runs
-        bhd.on_non_probe_acked((BLACK_HOLE_THRESHOLD + 1) as u64 * 2, 1400);
+        bhd.on_non_probe_acked((threshold + 1) as u64 * 2, 1400);
         // Loss detection then reveals bursts that were transmitted before that delivery
-        for i in 0..(BLACK_HOLE_THRESHOLD + 1) {
+        for i in 0..(threshold + 1) {
             bhd.on_non_probe_lost(i as u64 * 2 + 1, 1400);
         }
         assert!(
@@ -999,8 +1063,8 @@ mod tests {
             "full-size losses preceding a full-size delivery are not suspicious"
         );
         // Full-size losses transmitted after the last delivery are still suspicious
-        for i in 0..(BLACK_HOLE_THRESHOLD + 1) {
-            bhd.on_non_probe_lost((BLACK_HOLE_THRESHOLD as u64 + 1 + i as u64) * 2 + 1, 1400);
+        for i in 0..(threshold + 1) {
+            bhd.on_non_probe_lost((threshold as u64 + 1 + i as u64) * 2 + 1, 1400);
         }
         assert!(
             bhd.black_hole_detected(),
@@ -1012,12 +1076,13 @@ mod tests {
     // non-suspicious
     #[test]
     fn retroactively_non_suspicious() {
-        let mut bhd = BlackHoleDetector::new(1200);
-        for i in 0..BLACK_HOLE_THRESHOLD {
+        let threshold = MtuDiscoveryConfig::default().black_hole_threshold;
+        let mut bhd = BlackHoleDetector::new(1200, threshold);
+        for i in 0..threshold {
             bhd.on_non_probe_lost(i as u64 * 2, 1400);
         }
-        bhd.on_non_probe_acked(BLACK_HOLE_THRESHOLD as u64 * 2, 1400);
-        bhd.on_non_probe_lost(BLACK_HOLE_THRESHOLD as u64 * 2 + 1, 1400);
+        bhd.on_non_probe_acked(threshold as u64 * 2, 1400);
+        bhd.on_non_probe_lost(threshold as u64 * 2 + 1, 1400);
         assert!(!bhd.black_hole_detected());
     }
 }

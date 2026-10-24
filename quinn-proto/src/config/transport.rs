@@ -711,6 +711,7 @@ pub struct MtuDiscoveryConfig {
     pub(crate) interval: Duration,
     pub(crate) upper_bound: u16,
     pub(crate) minimum_change: u16,
+    pub(crate) black_hole_threshold: usize,
     pub(crate) black_hole_cooldown: Duration,
     pub(crate) blackhole_reset_mtu: bool,
 }
@@ -735,6 +736,16 @@ impl MtuDiscoveryConfig {
     /// only drawback is that MTU discovery might take more time to finish.
     pub fn upper_bound(&mut self, value: u16) -> &mut Self {
         self.upper_bound = value.min(MAX_UDP_PAYLOAD);
+        self
+    }
+
+    /// Maximum number of suspicious packet loss bursts tolerated before detecting an MTU black hole.
+    ///
+    /// Defaults to 6. Detection triggers when the number of suspicious loss bursts exceeds this
+    /// value. A value of 0 triggers detection on the first suspicious loss burst. Higher values
+    /// reduce false positives on lossy networks, but delay detection of actual MTU reductions.
+    pub fn black_hole_threshold(&mut self, value: usize) -> &mut Self {
+        self.black_hole_threshold = value;
         self
     }
 
@@ -771,6 +782,7 @@ impl Default for MtuDiscoveryConfig {
         Self {
             interval: Duration::from_secs(600),
             upper_bound: 1452,
+            black_hole_threshold: 6,
             black_hole_cooldown: Duration::from_secs(60),
             minimum_change: 20,
             blackhole_reset_mtu: true,
