@@ -139,16 +139,9 @@ async fn make_client(
     eprintln!("connecting to {remote}");
 
     let conn = match endpoint.connect(remote, host)?.into_0rtt() {
-        Ok((conn)) => {
-            let accepted = conn.clone();
-            tokio::spawn(async move {
-                assert!(accepted.authenticated().await.is_ok());
-                info!("0-RTT data accepted");
-            });
-            conn
-        }
+        Ok(conn) => conn,
         Err(conn) => {
-            assert!(zero_rtt == false);
+            assert!(!zero_rtt, "0-RTT keys unavailable");
             conn.await?
         }
     };
@@ -157,6 +150,9 @@ async fn make_client(
         .open_bi()
         .await
         .map_err(|e| anyhow!("failed to open stream: {}", e))?;
+
+    let sent_0rtt = recv.is_0rtt();
+    assert!(!zero_rtt || sent_0rtt, "expected a 0-RTT request stream");
 
     send.write_all(request.as_bytes())
         .await
@@ -171,6 +167,12 @@ async fn make_client(
     info!("max_datagran_size:{:?}", conn.max_datagram_size());
 
     assert!(resp == b"jls_server:test");
+    if sent_0rtt {
+        // Handshake completion alone does not prove that early data was accepted.
+        let stopped = send.stopped().await.context("0-RTT request failed")?;
+        assert_eq!(stopped, None, "0-RTT request was stopped by the server");
+        info!("0-RTT data accepted");
+    }
     info!("jls authed:{:?}", conn.is_jls());
     assert!(conn.is_jls() == Some(true));
     io::stdout().write_all(&resp).unwrap();
